@@ -19,7 +19,8 @@ WORKDIR /
 # Bump COMFY_REF when you want a newer version.
 ARG COMFY_REF=v0.3.27
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /ComfyUI && \
-    cd /ComfyUI && git checkout ${COMFY_REF}
+    cd /ComfyUI && git checkout ${COMFY_REF} && \
+    sed -i 's/comfyui-frontend-package==1.14.5/comfyui-frontend-package==1.14.6/' requirements.txt
 
 # Torch for CUDA 12.4
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
