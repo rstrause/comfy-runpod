@@ -1,0 +1,17 @@
+runpod_volume:
+  base_path: /runpod-volume
+  checkpoints: models/checkpoints/
+  clip: models/clip/
+  clip_vision: models/clip_vision/
+  configs: models/configs/
+  controlnet: models/controlnet/
+  embeddings: models/embeddings/
+  loras: models/loras/
+  upscale_models: models/upscale_models/
+  vae: models/vae/
+  vae_approx: models/vae_approx/
+  unet: models/unet/
+  diffusion_models: models/diffusion_models/
+  ipadapter: models/ipadapter/
+  text_encoders: models/text_encoders/
+  custom_nodes: custom_nodes/
