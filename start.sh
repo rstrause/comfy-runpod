@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Make ComfyUI's input/output dirs live on the network volume so files persist
+# across worker spawns and can be pre-uploaded via SSH.
+if [ -d /runpod-volume ]; then
+    mkdir -p /runpod-volume/input /runpod-volume/output
+    rm -rf /ComfyUI/input /ComfyUI/output
+    ln -sf /runpod-volume/input  /ComfyUI/input
+    ln -sf /runpod-volume/output /ComfyUI/output
+fi
+
 # Start ComfyUI in the background, bound to localhost only.
 echo "[start.sh] launching ComfyUI on :${COMFY_PORT}"
 python /ComfyUI/main.py \
