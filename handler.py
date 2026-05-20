@@ -32,7 +32,7 @@ JOB_TIMEOUT_S = int(os.environ.get("JOB_TIMEOUT_S", "600"))
 POLL_INTERVAL_S = 0.25
 
 
-def _wait_for_comfy(timeout_s: int = 120) -> None:
+def _wait_for_comfy(timeout_s: int = int(os.environ.get("COMFY_STARTUP_TIMEOUT", "300"))) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
