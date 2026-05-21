@@ -42,7 +42,14 @@ def _wait_for_comfy(timeout_s: int = int(os.environ.get("COMFY_STARTUP_TIMEOUT",
         except requests.RequestException:
             pass
         time.sleep(0.5)
-    raise RuntimeError("ComfyUI did not become ready in time")
+    # Surface ComfyUI's own log to the job response so we can diagnose without UI access
+    tail = ""
+    try:
+        with open("/tmp/comfyui.log", "r") as f:
+            tail = f.read()[-4000:]
+    except Exception as e:
+        tail = f"(could not read /tmp/comfyui.log: {e})"
+    raise RuntimeError(f"ComfyUI did not become ready in time. Last log:\n{tail}")
 
 
 def _upload_images(images: list[dict]) -> None:
