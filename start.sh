@@ -38,9 +38,11 @@ for i in $(seq 1 "${STARTUP_TIMEOUT}"); do
     # Every 30s, also check the comfy process is still alive
     if [ $((i % 30)) -eq 0 ]; then
         if ! kill -0 "$COMFY_PID" 2>/dev/null; then
-            echo "[start.sh] ERROR: ComfyUI process died — last 50 lines of log:"
-            tail -n 50 /tmp/comfyui.log || true
-            exit 1
+            echo "[start.sh] ERROR: ComfyUI process died — last 80 lines of log:"
+            tail -n 80 /tmp/comfyui.log || true
+            # Don't exit: still start the handler so it can return the log
+            # via the job response (handler reads /tmp/comfyui.log on _wait_for_comfy timeout).
+            break
         fi
         echo "[start.sh] still waiting (${i}s)..."
     fi
