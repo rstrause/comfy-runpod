@@ -1,47 +1,40 @@
 """RunPod serverless handler for ComfyUI.
 
+Lean import surface at module load (just runpod + stdlib) so the worker is
+immediately responsive to RunPod health checks. Heavy deps (requests, PIL,
+websocket-client) and ComfyUI itself are loaded/started lazily on the first
+job that actually needs them.
+
 Job input schema:
 {
   "input": {
     "workflow": { ... ComfyUI API-format workflow JSON ... },
     "images":   [ {"name": "ref.png", "image": "<base64>"} ],   # optional
     "return":   "base64" | "url"                                 # default base64
+    "diagnostic": true                                           # return worker state
   }
 }
-
-ComfyUI is started lazily on the first job that needs it, so the handler is
-immediately responsive to RunPod health checks and diagnostic calls.
 """
 
-import base64
-import json
 import os
+import socket
 import subprocess
 import threading
-import time
-import urllib.parse
-import uuid
-from io import BytesIO
 
-import requests
 import runpod
-import websocket
-from PIL import Image
 
-COMFY_HOST = f"127.0.0.1:{os.environ.get('COMFY_PORT', '8188')}"
-COMFY_HTTP = f"http://{COMFY_HOST}"
-COMFY_WS = f"ws://{COMFY_HOST}/ws"
-
-# Tunables
+COMFY_PORT = os.environ.get("COMFY_PORT", "8188")
+COMFY_HTTP = f"http://127.0.0.1:{COMFY_PORT}"
+COMFY_WS = f"ws://127.0.0.1:{COMFY_PORT}/ws"
 JOB_TIMEOUT_S = int(os.environ.get("JOB_TIMEOUT_S", "600"))
-POLL_INTERVAL_S = 0.25
+COMFY_STARTUP_TIMEOUT = int(os.environ.get("COMFY_STARTUP_TIMEOUT", "300"))
 
 # Lazy ComfyUI startup state
 _comfy_lock = threading.Lock()
-_comfy_proc: subprocess.Popen | None = None
+_comfy_proc = None  # type: ignore
 
 
-def _start_comfy_if_needed() -> None:
+def _start_comfy_if_needed():
     """Spawn ComfyUI as a child process on first call. Idempotent + thread-safe."""
     global _comfy_proc
     with _comfy_lock:
@@ -54,26 +47,25 @@ def _start_comfy_if_needed() -> None:
             os.makedirs("/runpod-volume/output", exist_ok=True)
             for d in ("input", "output"):
                 target = f"/ComfyUI/{d}"
-                if os.path.islink(target) or os.path.exists(target):
-                    try:
-                        if os.path.islink(target):
-                            os.unlink(target)
-                        else:
-                            import shutil; shutil.rmtree(target, ignore_errors=True)
-                    except Exception:
-                        pass
+                try:
+                    if os.path.islink(target):
+                        os.unlink(target)
+                    elif os.path.exists(target):
+                        import shutil
+                        shutil.rmtree(target, ignore_errors=True)
+                except Exception:
+                    pass
                 try:
                     os.symlink(f"/runpod-volume/{d}", target)
                 except FileExistsError:
                     pass
 
         log = open("/tmp/comfyui.log", "ab")
-        port = os.environ.get("COMFY_PORT", "8188")
-        print(f"[handler] launching ComfyUI on :{port}", flush=True)
+        print(f"[handler] launching ComfyUI on :{COMFY_PORT}", flush=True)
         _comfy_proc = subprocess.Popen(
             ["python", "-u", "/ComfyUI/main.py",
              "--listen", "127.0.0.1",
-             "--port", port,
+             "--port", COMFY_PORT,
              "--disable-auto-launch",
              "--disable-metadata"],
             stdout=log,
@@ -82,7 +74,9 @@ def _start_comfy_if_needed() -> None:
         )
 
 
-def _wait_for_comfy(timeout_s: int = int(os.environ.get("COMFY_STARTUP_TIMEOUT", "300"))) -> None:
+def _wait_for_comfy(timeout_s=COMFY_STARTUP_TIMEOUT):
+    import time
+    import requests
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -92,17 +86,54 @@ def _wait_for_comfy(timeout_s: int = int(os.environ.get("COMFY_STARTUP_TIMEOUT",
         except requests.RequestException:
             pass
         time.sleep(0.5)
-    # Surface ComfyUI's own log to the job response so we can diagnose without UI access
+    # Surface ComfyUI's log to the job response
     tail = ""
     try:
-        with open("/tmp/comfyui.log", "r") as f:
+        with open("/tmp/comfyui.log") as f:
             tail = f.read()[-4000:]
     except Exception as e:
-        tail = f"(could not read /tmp/comfyui.log: {e})"
-    raise RuntimeError(f"ComfyUI did not become ready in time. Last log:\n{tail}")
+        tail = f"(no log: {e})"
+    raise RuntimeError(f"ComfyUI did not become ready in time.\nLast log:\n{tail}")
 
 
-def _upload_images(images: list[dict]) -> None:
+def _diagnostic():
+    out = {
+        "handler_version": "2026-05-22-lazy",
+        "hostname": socket.gethostname(),
+        "env": {k: os.environ.get(k) for k in ("COMFY_PORT", "COMFY_STARTUP_TIMEOUT", "RUNPOD_POD_ID", "START_MINIMAL")},
+        "paths": {},
+        "comfy": {"started": _comfy_proc is not None},
+    }
+    for p in ("/runpod-volume", "/runpod-volume/models", "/runpod-volume/input",
+              "/runpod-volume/custom_nodes", "/ComfyUI", "/ComfyUI/input", "/tmp/comfyui.log"):
+        try:
+            out["paths"][p] = {"exists": os.path.exists(p), "is_link": os.path.islink(p)}
+            if os.path.isdir(p):
+                out["paths"][p]["entries"] = sorted(os.listdir(p))[:30]
+            elif os.path.islink(p):
+                out["paths"][p]["target"] = os.readlink(p)
+        except Exception as e:
+            out["paths"][p] = {"error": str(e)}
+    try:
+        import requests
+        r = requests.get(f"{COMFY_HTTP}/system_stats", timeout=3)
+        out["comfy"]["status"] = f"HTTP {r.status_code}"
+        out["comfy"]["body"] = r.json() if r.ok else r.text[:500]
+    except Exception as e:
+        out["comfy"]["status"] = "unreachable"
+        out["comfy"]["error"] = str(e)
+    try:
+        with open("/tmp/comfyui.log") as f:
+            out["comfy"]["log_tail"] = f.read()[-3000:]
+    except Exception as e:
+        out["comfy"]["log_tail"] = f"(no log: {e})"
+    return out
+
+
+def _upload_images(images):
+    import base64
+    from io import BytesIO
+    import requests
     for item in images:
         name = item["name"]
         blob = base64.b64decode(item["image"])
@@ -112,16 +143,19 @@ def _upload_images(images: list[dict]) -> None:
         r.raise_for_status()
 
 
-def _queue_prompt(workflow: dict, client_id: str) -> str:
-    payload = {"prompt": workflow, "client_id": client_id}
-    r = requests.post(f"{COMFY_HTTP}/prompt", json=payload, timeout=30)
+def _queue_prompt(workflow, client_id):
+    import requests
+    r = requests.post(f"{COMFY_HTTP}/prompt", json={"prompt": workflow, "client_id": client_id}, timeout=30)
     if not r.ok:
         raise RuntimeError(f"ComfyUI rejected prompt: {r.status_code} {r.text}")
     return r.json()["prompt_id"]
 
 
-def _wait_for_completion(prompt_id: str, client_id: str) -> dict:
-    """Block until the prompt finishes. Uses websocket for liveness, history for the result."""
+def _wait_for_completion(prompt_id, client_id):
+    import json
+    import time
+    import websocket
+    import requests
     ws = websocket.WebSocket()
     ws.connect(f"{COMFY_WS}?clientId={client_id}", timeout=10)
     deadline = time.time() + JOB_TIMEOUT_S
@@ -143,7 +177,6 @@ def _wait_for_completion(prompt_id: str, client_id: str) -> dict:
             raise TimeoutError(f"Workflow {prompt_id} did not finish in {JOB_TIMEOUT_S}s")
     finally:
         ws.close()
-
     r = requests.get(f"{COMFY_HTTP}/history/{prompt_id}", timeout=30)
     r.raise_for_status()
     history = r.json().get(prompt_id)
@@ -152,68 +185,33 @@ def _wait_for_completion(prompt_id: str, client_id: str) -> dict:
     return history
 
 
-def _fetch_image(filename: str, subfolder: str, folder_type: str) -> bytes:
-    q = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": folder_type})
-    r = requests.get(f"{COMFY_HTTP}/view?{q}", timeout=60)
-    r.raise_for_status()
-    return r.content
-
-
-def _collect_outputs(history: dict, return_mode: str) -> list[dict]:
+def _collect_outputs(history, return_mode):
+    import base64
+    import urllib.parse
+    import requests
     outputs = []
     for node_id, node_out in history.get("outputs", {}).items():
         for img in node_out.get("images", []) or []:
-            data = _fetch_image(img["filename"], img.get("subfolder", ""), img.get("type", "output"))
-            entry = {"node": node_id, "filename": img["filename"]}
-            if return_mode == "url":
-                # No object store wired up — fall back to base64 with a flag.
-                entry["image"] = base64.b64encode(data).decode()
-                entry["note"] = "return=url not configured; returned base64"
-            else:
-                entry["image"] = base64.b64encode(data).decode()
-            outputs.append(entry)
+            q = urllib.parse.urlencode({"filename": img["filename"],
+                                        "subfolder": img.get("subfolder", ""),
+                                        "type": img.get("type", "output")})
+            data = requests.get(f"{COMFY_HTTP}/view?{q}", timeout=60).content
+            outputs.append({"node": node_id, "filename": img["filename"],
+                            "image": base64.b64encode(data).decode()})
+        for vid in node_out.get("videos", []) or node_out.get("gifs", []) or []:
+            q = urllib.parse.urlencode({"filename": vid["filename"],
+                                        "subfolder": vid.get("subfolder", ""),
+                                        "type": vid.get("type", "output")})
+            data = requests.get(f"{COMFY_HTTP}/view?{q}", timeout=180).content
+            outputs.append({"node": node_id, "filename": vid["filename"],
+                            "data": base64.b64encode(data).decode()})
     return outputs
 
 
-def _diagnostic() -> dict:
-    """Quick worker introspection so we can see what's going on via API responses."""
-    import socket, glob
-    out = {
-        "handler_version": "2026-05-22-diag",
-        "hostname": socket.gethostname(),
-        "env": {k: os.environ.get(k) for k in ("COMFY_PORT", "COMFY_STARTUP_TIMEOUT", "RUNPOD_POD_ID")},
-        "paths": {},
-        "comfy": {},
-    }
-    for p in ("/runpod-volume", "/runpod-volume/models", "/runpod-volume/input",
-              "/runpod-volume/custom_nodes", "/ComfyUI", "/ComfyUI/input", "/tmp/comfyui.log"):
-        try:
-            out["paths"][p] = {"exists": os.path.exists(p), "is_link": os.path.islink(p)}
-            if os.path.isdir(p):
-                out["paths"][p]["entries"] = sorted(os.listdir(p))[:30]
-            elif os.path.islink(p):
-                out["paths"][p]["target"] = os.readlink(p)
-        except Exception as e:
-            out["paths"][p] = {"error": str(e)}
-    try:
-        r = requests.get(f"{COMFY_HTTP}/system_stats", timeout=3)
-        out["comfy"]["status"] = f"HTTP {r.status_code}"
-        out["comfy"]["body"] = r.json() if r.ok else r.text[:500]
-    except Exception as e:
-        out["comfy"]["status"] = "unreachable"
-        out["comfy"]["error"] = str(e)
-    try:
-        with open("/tmp/comfyui.log", "r") as f:
-            out["comfy"]["log_tail"] = f.read()[-3000:]
-    except Exception as e:
-        out["comfy"]["log_tail"] = f"(no log: {e})"
-    return out
-
-
-def handler(job: dict) -> dict:
+def handler(job):
     job_input = job.get("input") or {}
 
-    # Diagnostic mode: empty input OR explicit {"diagnostic": true} returns worker state
+    # Diagnostic mode: empty input OR explicit {"diagnostic": true}
     if not job_input or job_input.get("diagnostic"):
         return _diagnostic()
 
@@ -221,6 +219,7 @@ def handler(job: dict) -> dict:
     if not workflow:
         return {"error": "input.workflow is required (ComfyUI API-format JSON)"}
 
+    import uuid
     images = job_input.get("images") or []
     return_mode = job_input.get("return", "base64")
 
@@ -233,7 +232,6 @@ def handler(job: dict) -> dict:
     prompt_id = _queue_prompt(workflow, client_id)
     history = _wait_for_completion(prompt_id, client_id)
     outputs = _collect_outputs(history, return_mode)
-
     return {"prompt_id": prompt_id, "images": outputs}
 
 
