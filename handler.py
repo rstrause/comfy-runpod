@@ -41,11 +41,10 @@ def _start_comfy_if_needed():
         if _comfy_proc is not None and _comfy_proc.poll() is None:
             return  # already running
 
-        # Wire input/output to volume if present
+        # Wire input/output/custom_nodes to volume if present
         if os.path.isdir("/runpod-volume"):
-            os.makedirs("/runpod-volume/input", exist_ok=True)
-            os.makedirs("/runpod-volume/output", exist_ok=True)
-            for d in ("input", "output"):
+            for d in ("input", "output", "custom_nodes"):
+                os.makedirs(f"/runpod-volume/{d}", exist_ok=True)
                 target = f"/ComfyUI/{d}"
                 try:
                     if os.path.islink(target):
@@ -59,6 +58,17 @@ def _start_comfy_if_needed():
                     os.symlink(f"/runpod-volume/{d}", target)
                 except FileExistsError:
                     pass
+
+            # Install pip deps for custom nodes (idempotent — pip skips already-installed)
+            import glob
+            for req in glob.glob("/runpod-volume/custom_nodes/*/requirements.txt"):
+                print(f"[handler] pip install -r {req}", flush=True)
+                subprocess.run(
+                    ["pip", "install", "--no-cache-dir", "-q", "-r", req],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                )
 
         log = open("/tmp/comfyui.log", "ab")
         print(f"[handler] launching ComfyUI on :{COMFY_PORT}", flush=True)
