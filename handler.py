@@ -8,11 +8,16 @@ Job input schema:
     "return":   "base64" | "url"                                 # default base64
   }
 }
+
+ComfyUI is started lazily on the first job that needs it, so the handler is
+immediately responsive to RunPod health checks and diagnostic calls.
 """
 
 import base64
 import json
 import os
+import subprocess
+import threading
 import time
 import urllib.parse
 import uuid
@@ -30,6 +35,51 @@ COMFY_WS = f"ws://{COMFY_HOST}/ws"
 # Tunables
 JOB_TIMEOUT_S = int(os.environ.get("JOB_TIMEOUT_S", "600"))
 POLL_INTERVAL_S = 0.25
+
+# Lazy ComfyUI startup state
+_comfy_lock = threading.Lock()
+_comfy_proc: subprocess.Popen | None = None
+
+
+def _start_comfy_if_needed() -> None:
+    """Spawn ComfyUI as a child process on first call. Idempotent + thread-safe."""
+    global _comfy_proc
+    with _comfy_lock:
+        if _comfy_proc is not None and _comfy_proc.poll() is None:
+            return  # already running
+
+        # Wire input/output to volume if present
+        if os.path.isdir("/runpod-volume"):
+            os.makedirs("/runpod-volume/input", exist_ok=True)
+            os.makedirs("/runpod-volume/output", exist_ok=True)
+            for d in ("input", "output"):
+                target = f"/ComfyUI/{d}"
+                if os.path.islink(target) or os.path.exists(target):
+                    try:
+                        if os.path.islink(target):
+                            os.unlink(target)
+                        else:
+                            import shutil; shutil.rmtree(target, ignore_errors=True)
+                    except Exception:
+                        pass
+                try:
+                    os.symlink(f"/runpod-volume/{d}", target)
+                except FileExistsError:
+                    pass
+
+        log = open("/tmp/comfyui.log", "ab")
+        port = os.environ.get("COMFY_PORT", "8188")
+        print(f"[handler] launching ComfyUI on :{port}", flush=True)
+        _comfy_proc = subprocess.Popen(
+            ["python", "-u", "/ComfyUI/main.py",
+             "--listen", "127.0.0.1",
+             "--port", port,
+             "--disable-auto-launch",
+             "--disable-metadata"],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
 
 
 def _wait_for_comfy(timeout_s: int = int(os.environ.get("COMFY_STARTUP_TIMEOUT", "300"))) -> None:
@@ -174,6 +224,7 @@ def handler(job: dict) -> dict:
     images = job_input.get("images") or []
     return_mode = job_input.get("return", "base64")
 
+    _start_comfy_if_needed()
     _wait_for_comfy()
     if images:
         _upload_images(images)
