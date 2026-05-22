@@ -97,13 +97,21 @@ def _wait_for_comfy(timeout_s=COMFY_STARTUP_TIMEOUT):
 
 
 def _diagnostic():
+    """Return worker introspection. Only touches the volume if input.deep=True
+    so we can isolate whether /runpod-volume mount is the source of slowness."""
     out = {
-        "handler_version": "2026-05-22-lazy",
+        "handler_version": "2026-05-22-lazy-v2",
         "hostname": socket.gethostname(),
         "env": {k: os.environ.get(k) for k in ("COMFY_PORT", "COMFY_STARTUP_TIMEOUT", "RUNPOD_POD_ID", "START_MINIMAL")},
-        "paths": {},
         "comfy": {"started": _comfy_proc is not None},
     }
+    return out
+
+
+def _deep_diagnostic():
+    """Same as _diagnostic but also stats volume + tries ComfyUI."""
+    out = _diagnostic()
+    out["paths"] = {}
     for p in ("/runpod-volume", "/runpod-volume/models", "/runpod-volume/input",
               "/runpod-volume/custom_nodes", "/ComfyUI", "/ComfyUI/input", "/tmp/comfyui.log"):
         try:
@@ -212,7 +220,11 @@ def handler(job):
     job_input = job.get("input") or {}
 
     # Diagnostic mode: empty input OR explicit {"diagnostic": true}
+    # Empty/diagnostic returns minimal info quickly.
+    # {"diagnostic": "deep"} additionally stats the volume + tries ComfyUI.
     if not job_input or job_input.get("diagnostic"):
+        if job_input.get("diagnostic") == "deep":
+            return _deep_diagnostic()
         return _diagnostic()
 
     workflow = job_input.get("workflow")
