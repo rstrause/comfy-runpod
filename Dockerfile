@@ -36,6 +36,7 @@ COPY extra_model_paths.yaml /ComfyUI/extra_model_paths.yaml
 
 COPY start.sh /start.sh
 COPY handler.py /handler.py
+COPY minimal_handler.py /minimal_handler.py
 COPY test_input.json /test_input.json
 RUN chmod +x /start.sh
 

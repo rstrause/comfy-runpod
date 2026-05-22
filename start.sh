@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# NO set -e — we want to keep going on errors so we can see them.
 
-# Make ComfyUI's input/output dirs live on the network volume so files persist
-# across worker spawns and can be pre-uploaded via SSH.
-if [ -d /runpod-volume ]; then
-    echo "[start.sh] /runpod-volume is mounted, wiring input/output dirs"
-    mkdir -p /runpod-volume/input /runpod-volume/output
-    rm -rf /ComfyUI/input /ComfyUI/output
-    ln -sf /runpod-volume/input  /ComfyUI/input
-    ln -sf /runpod-volume/output /ComfyUI/output
-else
-    echo "[start.sh] WARNING: /runpod-volume not mounted; using container-local input/output"
+echo "[start.sh] booting; START_MINIMAL=${START_MINIMAL:-0}"
+
+if [ "${START_MINIMAL:-0}" = "1" ]; then
+    echo "[start.sh] MINIMAL mode — skipping ComfyUI, running minimal handler"
+    exec python -u /minimal_handler.py
 fi
 
-# Start ComfyUI in the background. We do NOT wait for it here — that would
-# delay the handler from being exposed and RunPod marks the worker unhealthy.
-# Instead, the handler's per-request _wait_for_comfy() handles the wait when
-# a job actually needs ComfyUI.
-echo "[start.sh] launching ComfyUI on :${COMFY_PORT} (background)"
-( python -u /ComfyUI/main.py \
+# Normal mode: wire input/output dirs, launch ComfyUI in background, exec handler.
+if [ -d /runpod-volume ]; then
+    echo "[start.sh] /runpod-volume is mounted, wiring input/output dirs"
+    mkdir -p /runpod-volume/input /runpod-volume/output || echo "[start.sh] mkdir failed"
+    rm -rf /ComfyUI/input /ComfyUI/output 2>/dev/null || true
+    ln -sf /runpod-volume/input  /ComfyUI/input  || echo "[start.sh] ln input failed"
+    ln -sf /runpod-volume/output /ComfyUI/output || echo "[start.sh] ln output failed"
+else
+    echo "[start.sh] WARNING: /runpod-volume not mounted"
+fi
+
+echo "[start.sh] launching ComfyUI on :${COMFY_PORT:-8188} (background)"
+python -u /ComfyUI/main.py \
     --listen 127.0.0.1 \
-    --port "${COMFY_PORT}" \
+    --port "${COMFY_PORT:-8188}" \
     --disable-auto-launch \
     --disable-metadata \
-    2>&1 | tee /tmp/comfyui.log ) &
+    > /tmp/comfyui.log 2>&1 &
 
-echo "[start.sh] starting RunPod handler immediately (ComfyUI continues to boot in background)"
+echo "[start.sh] starting RunPod handler immediately"
 exec python -u /handler.py
