@@ -125,8 +125,48 @@ def _collect_outputs(history: dict, return_mode: str) -> list[dict]:
     return outputs
 
 
+def _diagnostic() -> dict:
+    """Quick worker introspection so we can see what's going on via API responses."""
+    import socket, glob
+    out = {
+        "handler_version": "2026-05-22-diag",
+        "hostname": socket.gethostname(),
+        "env": {k: os.environ.get(k) for k in ("COMFY_PORT", "COMFY_STARTUP_TIMEOUT", "RUNPOD_POD_ID")},
+        "paths": {},
+        "comfy": {},
+    }
+    for p in ("/runpod-volume", "/runpod-volume/models", "/runpod-volume/input",
+              "/runpod-volume/custom_nodes", "/ComfyUI", "/ComfyUI/input", "/tmp/comfyui.log"):
+        try:
+            out["paths"][p] = {"exists": os.path.exists(p), "is_link": os.path.islink(p)}
+            if os.path.isdir(p):
+                out["paths"][p]["entries"] = sorted(os.listdir(p))[:30]
+            elif os.path.islink(p):
+                out["paths"][p]["target"] = os.readlink(p)
+        except Exception as e:
+            out["paths"][p] = {"error": str(e)}
+    try:
+        r = requests.get(f"{COMFY_HTTP}/system_stats", timeout=3)
+        out["comfy"]["status"] = f"HTTP {r.status_code}"
+        out["comfy"]["body"] = r.json() if r.ok else r.text[:500]
+    except Exception as e:
+        out["comfy"]["status"] = "unreachable"
+        out["comfy"]["error"] = str(e)
+    try:
+        with open("/tmp/comfyui.log", "r") as f:
+            out["comfy"]["log_tail"] = f.read()[-3000:]
+    except Exception as e:
+        out["comfy"]["log_tail"] = f"(no log: {e})"
+    return out
+
+
 def handler(job: dict) -> dict:
     job_input = job.get("input") or {}
+
+    # Diagnostic mode: empty input OR explicit {"diagnostic": true} returns worker state
+    if not job_input or job_input.get("diagnostic"):
+        return _diagnostic()
+
     workflow = job_input.get("workflow")
     if not workflow:
         return {"error": "input.workflow is required (ComfyUI API-format JSON)"}
@@ -147,4 +187,5 @@ def handler(job: dict) -> dict:
 
 
 if __name__ == "__main__":
+    print("[handler] starting RunPod serverless handler", flush=True)
     runpod.serverless.start({"handler": handler})
