@@ -118,6 +118,32 @@ def _diagnostic():
     return out
 
 
+def _output_diagnostic():
+    """List what's in /runpod-volume/output so we can verify if recent workflows
+    actually produced files even when the API response came back empty."""
+    out = {"handler_version": "2026-05-22-out-diag"}
+    out_dir = "/runpod-volume/output"
+    if not os.path.isdir(out_dir):
+        return {"error": f"{out_dir} does not exist"}
+    files = []
+    for root, _, fnames in os.walk(out_dir):
+        for fname in fnames:
+            p = os.path.join(root, fname)
+            try:
+                st = os.stat(p)
+                files.append({
+                    "path": p,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+            except Exception as e:
+                files.append({"path": p, "error": str(e)})
+    files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
+    out["files"] = files[:50]
+    out["total"] = len(files)
+    return out
+
+
 def _node_diagnostic():
     """Start ComfyUI if not running, then enumerate its registered nodes.
     Surfaces which custom_node imports actually succeeded."""
@@ -269,6 +295,8 @@ def handler(job):
     if not job_input or job_input.get("diagnostic"):
         if job_input.get("diagnostic") == "nodes":
             return _node_diagnostic()
+        if job_input.get("diagnostic") == "outputs":
+            return _output_diagnostic()
         if job_input.get("diagnostic") == "deep":
             return _deep_diagnostic()
         return _diagnostic()
