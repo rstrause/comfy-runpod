@@ -17,7 +17,8 @@ WORKDIR /
 
 # ComfyUI — pinned to a known-good commit so rebuilds are reproducible.
 # Bump COMFY_REF when you want a newer version.
-ARG COMFY_REF=v0.3.27
+# v0.22+ required for newer custom nodes (KJNodes uses comfy_api, WanVideoWrapper uses apply_rope1).
+ARG COMFY_REF=v0.22.2
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /ComfyUI && \
     cd /ComfyUI && git checkout ${COMFY_REF} && \
     sed -i 's/comfyui-frontend-package==1.14.5/comfyui-frontend-package==1.14.6/' requirements.txt
