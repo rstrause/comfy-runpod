@@ -335,6 +335,19 @@ def handler(job):
         result["execution_error"] = exec_error
     if not outputs and not exec_error:
         result["warning"] = "Workflow completed but no images/videos were collected. Check status messages and outputs_index."
+
+    # Persist a metadata-only copy of the result to the volume so we can retrieve it
+    # via diagnostic even if RunPod drops the API response (e.g. response too large).
+    try:
+        import json as _json
+        os.makedirs("/runpod-volume/output", exist_ok=True)
+        slim = {k: v for k, v in result.items() if k != "images"}
+        slim["image_count"] = len(outputs)
+        slim["image_filenames"] = [o.get("filename") for o in outputs if isinstance(o, dict)]
+        with open(f"/runpod-volume/output/_last_response_{prompt_id}.json", "w") as f:
+            _json.dump(slim, f, indent=2, default=str)
+    except Exception as e:
+        result["persist_error"] = str(e)
     return result
 
 
