@@ -118,6 +118,26 @@ def _diagnostic():
     return out
 
 
+def _read_last_response():
+    """Return the contents of the most recent _last_response_*.json file
+    so we can see what the handler returned even when RunPod drops the response."""
+    import glob, json
+    files = sorted(glob.glob("/runpod-volume/output/_last_response_*.json"),
+                   key=lambda p: os.path.getmtime(p), reverse=True)
+    out = {"handler_version": "2026-05-22-read", "found_files": [os.path.basename(p) for p in files[:10]]}
+    if not files:
+        out["error"] = "no _last_response files found"
+        return out
+    latest = files[0]
+    out["latest_file"] = os.path.basename(latest)
+    try:
+        with open(latest) as f:
+            out["content"] = json.load(f)
+    except Exception as e:
+        out["error"] = f"failed to read {latest}: {e}"
+    return out
+
+
 def _output_diagnostic():
     """List what's in /runpod-volume/output so we can verify if recent workflows
     actually produced files even when the API response came back empty."""
@@ -297,6 +317,8 @@ def handler(job):
             return _node_diagnostic()
         if job_input.get("diagnostic") == "outputs":
             return _output_diagnostic()
+        if job_input.get("diagnostic") == "last":
+            return _read_last_response()
         if job_input.get("diagnostic") == "deep":
             return _deep_diagnostic()
         return _diagnostic()
