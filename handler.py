@@ -205,6 +205,7 @@ def _wait_for_completion(prompt_id, client_id):
     ws = websocket.WebSocket()
     ws.connect(f"{COMFY_WS}?clientId={client_id}", timeout=10)
     deadline = time.time() + JOB_TIMEOUT_S
+    exec_error = None
     try:
         while time.time() < deadline:
             ws.settimeout(min(5.0, deadline - time.time()))
@@ -215,10 +216,12 @@ def _wait_for_completion(prompt_id, client_id):
             if not isinstance(msg, str):
                 continue
             data = json.loads(msg)
-            if data.get("type") == "executing":
-                d = data.get("data", {})
-                if d.get("prompt_id") == prompt_id and d.get("node") is None:
-                    break
+            t = data.get("type")
+            d = data.get("data", {})
+            if t == "execution_error" and d.get("prompt_id") == prompt_id:
+                exec_error = d
+            if t == "executing" and d.get("prompt_id") == prompt_id and d.get("node") is None:
+                break
         else:
             raise TimeoutError(f"Workflow {prompt_id} did not finish in {JOB_TIMEOUT_S}s")
     finally:
@@ -228,6 +231,9 @@ def _wait_for_completion(prompt_id, client_id):
     history = r.json().get(prompt_id)
     if not history:
         raise RuntimeError(f"No history for prompt {prompt_id}")
+    if exec_error:
+        # Embed it on the history so the handler can surface it
+        history["_exec_error"] = exec_error
     return history
 
 
@@ -283,8 +289,25 @@ def handler(job):
     client_id = str(uuid.uuid4())
     prompt_id = _queue_prompt(workflow, client_id)
     history = _wait_for_completion(prompt_id, client_id)
+
+    # Surface execution errors and history shape so failures aren't silent
+    exec_error = history.pop("_exec_error", None)
+    status = history.get("status", {})
+    outputs_index = {nid: list(node_out.keys()) for nid, node_out in history.get("outputs", {}).items()}
+
     outputs = _collect_outputs(history, return_mode)
-    return {"prompt_id": prompt_id, "images": outputs}
+
+    result = {
+        "prompt_id": prompt_id,
+        "images": outputs,
+        "status": status,
+        "outputs_index": outputs_index,
+    }
+    if exec_error:
+        result["execution_error"] = exec_error
+    if not outputs and not exec_error:
+        result["warning"] = "Workflow completed but no images/videos were collected. Check status messages and outputs_index."
+    return result
 
 
 if __name__ == "__main__":
