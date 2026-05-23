@@ -118,6 +118,34 @@ def _diagnostic():
     return out
 
 
+def _node_diagnostic():
+    """Start ComfyUI if not running, then enumerate its registered nodes.
+    Surfaces which custom_node imports actually succeeded."""
+    _start_comfy_if_needed()
+    _wait_for_comfy()
+    import requests
+    out = {"handler_version": "2026-05-22-node-diag"}
+    try:
+        r = requests.get(f"{COMFY_HTTP}/object_info", timeout=30)
+        info = r.json()
+        all_nodes = sorted(info.keys())
+        out["total_nodes"] = len(all_nodes)
+        out["wanvideo_nodes"] = [n for n in all_nodes if "WanVideo" in n or "Wan" in n]
+        out["vhs_nodes"] = [n for n in all_nodes if n.startswith("VHS_") or "Video" in n]
+        out["kj_nodes_sample"] = [n for n in all_nodes if any(k in n for k in ("KJ", "ImageResizeKJ", "INTConstant", "GetImageSize"))]
+        out["face_mask_present"] = "FaceMaskFromPoseKeypoints" in all_nodes
+        out["dwpose_present"] = "DWPreprocessor" in all_nodes
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    # Also include the comfy log tail in case there were import errors
+    try:
+        with open("/tmp/comfyui.log") as f:
+            out["log_tail"] = f.read()[-5000:]
+    except Exception as e:
+        out["log_tail"] = f"(no log: {e})"
+    return out
+
+
 def _deep_diagnostic():
     """Same as _diagnostic but also stats volume + tries ComfyUI."""
     out = _diagnostic()
@@ -233,6 +261,8 @@ def handler(job):
     # Empty/diagnostic returns minimal info quickly.
     # {"diagnostic": "deep"} additionally stats the volume + tries ComfyUI.
     if not job_input or job_input.get("diagnostic"):
+        if job_input.get("diagnostic") == "nodes":
+            return _node_diagnostic()
         if job_input.get("diagnostic") == "deep":
             return _deep_diagnostic()
         return _diagnostic()
