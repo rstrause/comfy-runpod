@@ -118,6 +118,25 @@ def _diagnostic():
     return out
 
 
+def _get_file(filename):
+    """Return a file from /runpod-volume/output as base64."""
+    import base64
+    safe = os.path.basename(filename)  # strip any path traversal
+    path = os.path.join("/runpod-volume/output", safe)
+    if not os.path.exists(path):
+        return {"error": f"file not found: {path}", "looked_for": safe}
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        return {
+            "filename": safe,
+            "size": len(data),
+            "data": base64.b64encode(data).decode(),
+        }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def _read_last_response():
     """Return the contents of the most recent _last_response_*.json file
     so we can see what the handler returned even when RunPod drops the response."""
@@ -321,6 +340,8 @@ def handler(job):
             return _read_last_response()
         if job_input.get("diagnostic") == "deep":
             return _deep_diagnostic()
+        if job_input.get("diagnostic") == "get_file":
+            return _get_file(job_input.get("filename", ""))
         return _diagnostic()
 
     workflow = job_input.get("workflow")
